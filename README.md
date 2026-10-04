@@ -1,133 +1,220 @@
 # EGridCast
 
-An end-to-end Victoria electricity-demand forecasting studio: five models, a common next-24-hours protocol, FastAPI inference, and a React dashboard. Modelling is refactored from the existing notebooks, which remain intact.
+**Hourly electricity demand forecasting for Victoria, Australia.**
 
-## Architecture and data flow
+EGridCast compares statistical, machine learning, and deep learning approaches to forecasting the next 24 hours of electricity demand. It processes AEMO National Electricity Market data for Victoria’s VIC1 region, evaluates five models under a shared forecasting protocol, and serves predictions through a FastAPI backend and an interactive React dashboard.
 
-```text
-AEMO monthly CSVs → combine_files.py → canonical processed CSV
- → schema/quality validation → hourly TOTALDEMAND mean
- → chronological CV / validation → frozen configuration → August holdout
- → immutable evaluation JSON + forecast-level CSV
- → separate all-history production fit → versioned artifacts
- → FastAPI services → React / Radix UI / Recharts dashboard
+The project connects time-series data preparation, model training and evaluation, versioned model storage, API inference, and frontend visualisation in one application.
+
+## Project Highlights
+
+- **Five forecasting models:** SARIMA, XGBoost, RNN, LSTM, and Transformer.
+- **Comparable evaluation:** shared forecast origins, 24-hour targets, and chronological validation and test periods.
+- **Interactive dashboard:** historical demand, model-specific forecasts, forecast-horizon errors, and side-by-side model comparison.
+- **Separate training and inference:** models train offline; API requests use saved models to generate predictions.
+- **Traceable outputs:** evaluation reports and model artifacts record configurations, dataset hashes, and training metadata.
+
+## System Architecture
+
+```mermaid
+flowchart TD
+    A[AEMO monthly CSV files] --> B[Combine and validate data]
+    B --> C[Hourly demand series]
+    C --> D[Chronological training and validation]
+    D --> E[Freeze model configurations]
+    E --> F[August holdout evaluation]
+    F --> G[Metrics and forecast records]
+    F --> H[Refit models on all available history]
+    H --> I[Versioned model artifacts]
+    C --> J[FastAPI backend]
+    G --> J
+    I --> J
+    J --> K[React forecasting dashboard]
 ```
 
-Python modules separate data preparation, model adapters, evaluation, offline training, artifact publication, services, schemas and routes. Frontend data is always fetched from the backend. No sample forecasts or invented scores are embedded.
+## Data and Preprocessing
 
-## Models and notebook provenance
+The input consists of AEMO price-and-demand CSV files for **VIC1**. The forecasting target is `TOTALDEMAND`, measured in megawatts (MW); timestamps come from `SETTLEMENTDATE`.
 
-| Model | Implementation | Forecast strategy |
-|---|---|---|
-| SARIMA | Notebook 01 SARIMAX (2,0,1) × (1,0,1,24) | 24-step forecast with fixed fitted coefficients; filter observed history at each origin |
-| XGBoost | Notebook 02 lags 1/2/24/48/168, rolling mean/std 24/168, calendar features; depth 6, learning rate .03 | 24 horizon-specific XGBRegressors; observed lags remain fixed at origin |
-| RNN | Notebook 03 nn.RNN, 64 units, one layer | 168 observations → 24 outputs |
-| LSTM | Notebook 03 nn.LSTM, 64 units, one layer | 168 observations → 24 outputs |
-| Transformer | Notebook 03 high-level encoder, learned position, 64 dimensions, 4 heads, 2 layers, feedforward 128 | 168 observations → 24 outputs |
+The preprocessing pipeline:
 
-Notebook one-step SARIMA/XGBoost scores are intentionally not imported into the 24-hour comparison. Neural best validation checkpoints are actually restored before scoring.
+1. Combines monthly files, sorts records chronologically, removes duplicate source timestamps, and reports missing five-minute intervals.
+2. Validates the required columns, region, timestamp alignment, and positive, finite demand values. The hourly loader rejects any remaining duplicate timestamps.
+3. Aggregates five-minute observations into hourly mean demand. Entirely missing hours are rejected; partially populated hours are retained and recorded in a data quality report.
+4. Builds model-specific lag features or input sequences using only observations available at the forecast origin.
+5. Standardises neural-network inputs using a scaler fitted exclusively on the relevant training partition.
 
-## Setup
+Timestamps use **fixed AEST (UTC+10)**, consistent with NEM market time, rather than daylight-saving local time. The models predict hourly average demand, not energy consumption.
 
-Requires Python 3.11+, `uv`, Node 20.19+ or 22.12+, and npm. From the repository root:
+## Forecasting Models
+
+All models produce 24 hourly demand predictions. XGBoost and the neural models use a 168-hour history window; SARIMA uses the available observed history.
+
+| Model | Approach | Implementation |
+| --- | --- | --- |
+| **SARIMA** | Seasonal statistical forecasting | SARIMAX implementation with order `(2, 0, 1)` and seasonal order `(1, 0, 1, 24)`. Fitted coefficients remain fixed while the state is updated from observed history at each forecast origin. |
+| **XGBoost** | Gradient-boosted decision trees | One regressor per forecast horizon. Features include demand lags at 1, 2, 24, 48, and 168 hours; 24- and 168-hour rolling means and standard deviations; and target-hour calendar features. |
+| **RNN** | Recurrent sequence modelling | A single recurrent layer with 64 hidden units maps 168 hourly observations to 24 outputs. |
+| **LSTM** | Gated recurrent sequence modelling | A single LSTM layer with 64 hidden units maps 168 hourly observations to 24 outputs. |
+| **Transformer** | Attention-based sequence modelling | Two encoder layers, four attention heads, 64-dimensional representations, learned positional embeddings, and a 24-output prediction head. |
+
+Neural models use Adam optimisation, mean squared error loss, gradient clipping, and validation-based early stopping. The best validation checkpoint is restored before evaluation.
+
+## Evaluation Methodology
+
+Time ordering is preserved throughout training and evaluation to prevent future observations from entering model fitting or forecast inputs.
+
+| Stage | Period or procedure |
+| --- | --- |
+| Development training | Available history through 31 May 2026 |
+| Validation | June–July 2026 |
+| Cross-validation | Three expanding-window folds within pre-August data by default |
+| Final test | August 2026, held out from model selection |
+| Production fit | All available history, using the frozen evaluation configuration |
+
+Model configurations and neural training durations are frozen before final test scoring. Test models are refitted on pre-August data. Every model is scored at the same forecast origins, spaced 24 hours apart by default, with a complete 24-hour target window. Later forecasts can use newly observed history, but never observations from within their own prediction window.
+
+Evaluation reports include:
+
+- **MAE (MW):** average absolute forecast error.
+- **RMSE (MW):** error magnitude with greater weight on larger deviations.
+- **MAPE (%):** average absolute percentage error.
+- **MAE by forecast horizon:** error for each hour ahead, from 1 to 24.
+
+Each completed evaluation saves metrics, frozen configurations, and forecast-level predictions. A separate production fit retrains the models on all available history for serving; the reported holdout scores remain associated with the evaluation models.
+
+## Application
+
+### Frontend
+
+The React and TypeScript dashboard provides:
+
+- **Hourly Demand Outlook:** recent observed demand and a selected model’s next 24-hour forecast.
+- **Error by Forecast Horizon:** the selected model’s MAE across the prediction window.
+- **Model details:** architecture, input history window, training cutoff, and configuration.
+- **24-Hour Model Comparison:** aligned forecasts from all five models on one chart.
+- **Model Performance Comparison:** validation and test metrics in a comparison table.
+
+The interface uses Recharts for visualisation, Radix UI for evaluation tabs, and responsive CSS for desktop and mobile layouts. Forecasts and metrics are retrieved from the backend.
+
+### Backend
+
+FastAPI exposes demand history, evaluation metrics, model availability, and forecast generation. Training runs through a separate command-line interface rather than through API requests.
+
+Saved models include preprocessing state, configuration, training cutoff, evaluation ID, dataset hash, model checksum, and package versions. Before serving forecasts, the backend checks that the model artifacts match the current dataset.
+
+| Endpoint | Purpose |
+| --- | --- |
+| `GET /api/health` | Check data and model readiness |
+| `GET /api/models` | Retrieve model availability and metadata |
+| `GET /api/history?hours=168` | Retrieve recent hourly demand |
+| `GET /api/metrics` | Retrieve published evaluation results |
+| `POST /api/forecast` | Generate a forecast for a selected model, e.g. `{"model":"LSTM"}` |
+| `POST /api/forecast/compare` | Generate aligned forecasts for all five models |
+
+## Technology Stack
+
+| Layer | Technologies |
+| --- | --- |
+| Data processing | Python, pandas, NumPy |
+| Statistical and machine learning models | statsmodels, XGBoost, scikit-learn |
+| Deep learning | PyTorch |
+| API | FastAPI, Pydantic, Uvicorn |
+| Frontend | React, TypeScript, Vite, Recharts, Radix UI |
+| Testing and code quality | pytest, Vitest, Playwright, Ruff, Prettier |
+| Dependency management | uv, npm |
+
+## Run Locally
+
+### 1. Install dependencies
+
+Requires Python 3.11+, uv, npm, and Node.js 20.19+ or 22.12+.
 
 ```bash
 uv sync --group dev
 npm ci --prefix frontend
-uv run python scripts/combine_files.py  # only if rebuilding processed data from raw monthly files
+```
+
+### 2. Prepare the data
+
+Data and trained artifacts are excluded from Git. Place the monthly VIC1 files matching `PRICE_AND_DEMAND_*_VIC1.csv` in `data/raw/`, then run:
+
+```bash
+uv run python scripts/combine_files.py
 uv run egridcast inspect
 ```
 
-Canonical CSV: `data/processed/PRICE_AND_DEMAND_2025_26_VIC1.csv`, with SETTLEMENTDATE, REGION=VIC1, TOTALDEMAND. Data is local and ignored by Git. The loader sorts chronologically, rejects duplicate source times and missing entire hours, and reports partial hours and hourly duplicates. It preserves the notebooks' hourly mean convention, including partial boundary bins.
+Alternatively, provide an existing combined CSV at `data/processed/PRICE_AND_DEMAND_2025_26_VIC1.csv`. The evaluation pipeline expects data covering the training, validation, and test periods described above.
 
-AEMO market timestamps are interpreted as **fixed AEST (UTC+10)**, not Melbourne daylight-saving civil time. Forecast point timestamps are hourly bin labels. The current file ends at 1 September 2026 00:00 and includes only one source reading in that final hourly bin; this partial hour is explicitly reported.
-
-## Offline evaluation and production training
-
-These are the long-running steps to execute locally. Training is CPU-based and deterministic where practical. On macOS, the package limits OpenMP, PyTorch and XGBoost to one thread to avoid conflicting bundled OpenMP runtimes; other platforms use two training threads. Full Transformer training and repeated SARIMA fits can take substantial time.
+### 3. Evaluate and train
 
 ```bash
 uv run egridcast evaluate --folds 3 --epochs 30 --stride 24 --trees 800 --sarima-maxiter 100 && \
   uv run egridcast production-fit
 ```
 
-The `&&` runs production training only after evaluation exits successfully. Wait for `Evaluation complete and published`; an incomplete run has no `evaluation/current.json` and cannot be used for production training. SARIMA optimization can be quiet for a substantial time between progress messages.
+Evaluation must complete successfully before production fitting begins. Training runs on CPU and can take substantial time, particularly for SARIMA and Transformer models. If SARIMA does not converge, increase `--sarima-maxiter` and rerun evaluation.
 
-Training ends May 31, 2026; validation is June–July; August is the final holdout. Three configurable expanding folds run within pre-August data. Each fold fits its scaler only on its training prefix. All five models use the same complete forecast origins and 24-hour targets; default origin stride is 24 hours. Later origins may use actual observations already revealed before that origin. No actual within the forecast horizon is ever used.
+### 4. Start the application
 
-Development configurations and neural epoch counts are frozen before any final test scoring. Final evaluation models refit on pre-August data for those frozen epoch counts. Outputs are `artifacts/evaluation/<run-id>/metrics.json`, `frozen_config.json`, and `predictions.csv`. A completed run is published through `evaluation/current.json`; incomplete runs are not shown in the UI. JSON includes per-fold CV, validation and test MAE/RMSE/MAPE and 24 horizon MAEs. MAPE is expressed in percent.
-
-`production-fit` requires a complete published evaluation and an identical dataset hash. It uses the frozen settings to train on **all available history** without selecting parameters on the test set. Each model has a versioned folder under `artifacts/production/<model>/<version>/` containing preprocessing/model state and metadata: configuration, training cutoff, UTC training time, dataset hash, model checksum, Python/package versions and evaluation ID. A model pointer is published atomically after saving. Historical metrics remain separate. Models are trusted local pickle files; do not load artifacts from untrusted sources. Use the locked environment for compatibility.
-
-For a faster pipeline exercise (real but deliberately undertrained results):
+Run the backend and frontend in separate terminals:
 
 ```bash
-uv run egridcast evaluate --folds 1 --epochs 1 --stride 168 --trees 10 --sarima-maxiter 200
+# Backend
+uv run uvicorn egridcast.api:app --reload --host 127.0.0.1 --port 8000
 ```
 
-This still performs real fits on the repository data; it is not a substitute for the full portfolio evaluation. SARIMA nonconvergence stops the run; increase its iteration limit and rerun rather than publish an unverified fit.
-
-## Run the application
-
-In separate terminals:
-
 ```bash
-uv run uvicorn egridcast.api:app --reload --host 127.0.0.1 --port 8000
+# Frontend
 npm run dev --prefix frontend
 ```
 
-Open `http://localhost:5173`. API documentation: `http://127.0.0.1:8000/docs`. The dashboard includes historical and forecast demand, all-model comparison, split-specific metric cards/table, horizon error, artifact metadata, responsive design, and missing/error/loading states. Refresh the model registry after offline training. Restart the API after replacing the data file (history is cached per process).
+Open the dashboard at **http://localhost:5173** and the interactive API documentation at **http://127.0.0.1:8000/docs**. Forecasts require trained production artifacts; evaluation metrics require a completed evaluation run.
 
-Environment overrides:
+### Configuration
 
-| Variable | Default |
-|---|---|
-| EGRIDCAST_DATA | repository canonical CSV path |
-| EGRIDCAST_ARTIFACTS | repository artifacts directory |
-| EGRIDCAST_CORS_ORIGIN | http://localhost:5173 |
-| VITE_API_URL | empty; Vite proxies /api to localhost:8000 |
+| Environment variable | Default |
+| --- | --- |
+| `EGRIDCAST_DATA` | `data/processed/PRICE_AND_DEMAND_2025_26_VIC1.csv` in the repository |
+| `EGRIDCAST_ARTIFACTS` | `artifacts/` in the repository |
+| `EGRIDCAST_CORS_ORIGIN` | `http://localhost:5173` |
+| `VITE_API_URL` | Empty; the development server proxies `/api` to the backend |
 
-For hosting, configure `VITE_API_URL` at frontend build time and the exact allowed CORS origin on the backend. Serve `frontend/dist` using your static host. Paths can be absolute to run outside the repository directory.
+## Repository Structure
 
-## API
+```text
+EGridCast/
+├── src/egridcast/
+│   ├── models/          # Statistical, boosted-tree, and neural models
+│   ├── data.py          # Validation, resampling, and feature construction
+│   ├── evaluation.py    # Chronological folds and forecast scoring
+│   ├── training.py      # Offline evaluation and production fitting
+│   ├── artifacts.py     # Model persistence and metadata
+│   ├── services.py      # History, metrics, and inference services
+│   ├── schemas.py       # API request and response schemas
+│   └── api.py           # FastAPI routes
+├── frontend/            # React dashboard and frontend tests
+├── scripts/             # Data preparation utilities
+├── tests/               # Backend tests
+├── data/                # Local input and processed data (not tracked)
+└── artifacts/           # Local evaluation and model outputs (not tracked)
+```
 
-| Endpoint | Behavior |
-|---|---|
-| GET /api/health | data readiness and available artifacts; degraded is an honest 200 status payload |
-| GET /api/models | five-model registry and production metadata |
-| GET /api/history?hours=168 | recent hourly means (24–2160 hours), fixed timezone and quality report |
-| GET /api/metrics | published real evaluation; available=false before evaluation |
-| POST /api/forecast | JSON `{"model":"LSTM"}`; 24 timestamped predicted_demand_mw points, origin, version and cutoff |
-| POST /api/forecast/compare | all five aligned forecasts; requires every artifact |
+## Testing
 
-Missing data/artifacts return 503 with actionable details. Invalid model names return 422. API requests only load artifacts and infer; they do not train. Production artifact hashes/cutoffs must match the current dataset.
-
-## Verification
+Backend tests cover data validation, sequence and feature alignment, chronological splits, scaler isolation, model outputs, artifact persistence, and API behaviour. Frontend tests cover chart data alignment, and browser tests exercise the dashboard.
 
 ```bash
 uv run pytest
 uv run ruff check src scripts tests
-uv run ruff format --check src scripts tests
-npm run format:check --prefix frontend
 npm test --prefix frontend
 npm run build --prefix frontend
-npm run test:e2e --prefix frontend  # with both servers running; uses local Chrome by default
 ```
 
-Backend tests cover raw quality validation, hourly means, sequence alignment, origin-relative features, future perturbations, chronological folds, comparable metrics, scaler isolation, model shape, artifact roundtrip, online inference, missing models and API validation. Frontend tests cover historical/forecast boundaries, timestamp alignment and empty data.
+Run `npm run test:e2e --prefix frontend` with both application servers running to execute the browser tests.
 
-## Screenshots
+## Scope and Future Work
 
-Verified screenshots of the dashboard using real repository history, before model training:
+EGridCast currently uses a historical dataset rather than a live AEMO feed. Forecasts are point estimates based on demand history and calendar features; weather, public holidays, and prediction intervals are not yet included. Evaluation uses fixed historical periods and daily forecast origins by default.
 
-- [Desktop dashboard](docs/screenshots/dashboard-before-training.png)
-- [Mobile dashboard](docs/screenshots/mobile-before-training.png)
-
-Capture these additional views after full evaluation and production fitting:
-
-- `docs/screenshots/forecast-studio.png` — history and selected 24-hour forecast (placeholder).
-- `docs/screenshots/model-comparison.png` — five-model overlay and August test metrics (placeholder).
-
-## Limitations and next improvements
-
-This is a historical research application, not a live AEMO feed. Hourly means preserve partial boundary bins for notebook compatibility; a stricter coverage policy is a possible next experiment. Hyperparameters follow notebook baselines rather than exhaustive search. Daily evaluation origins reduce runtime and do not represent every possible hourly forecast origin. Production neural epoch counts are transferred from pre-test validation. Forecasts have no uncertainty bands or weather/holiday inputs; negative predictions are not silently clipped. API history stays cached until restart. Artifacts publish per model; complete comparison becomes available when all five finish. Training is intentionally offline and is not started by the UI. Add live ingestion, prediction intervals, weather covariates, monitored drift and scheduled retraining as future work.
+Future extensions include live data ingestion, weather and holiday features, probabilistic forecasts, broader hyperparameter optimisation, and monitoring for forecast drift and scheduled retraining.
