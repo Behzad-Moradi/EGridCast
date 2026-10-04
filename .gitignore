@@ -1,0 +1,28 @@
+# Virtual environment
+.venv/
+
+# Data
+data/raw/
+data/processed/
+
+# Jupyter
+notebooks/
+.ipynb_checkpoints/
+
+# Python
+__pycache__/
+*.pyc
+
+# macOS
+.DS_Store
+# Generated artifacts and frontend builds
+artifacts/
+frontend/node_modules/
+frontend/dist/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+.env
+frontend/*.tsbuildinfo
+frontend/test-results/
+frontend/playwright-report/

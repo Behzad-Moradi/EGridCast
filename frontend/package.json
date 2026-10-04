@@ -1,0 +1,32 @@
+{
+  "name": "egridcast-dashboard",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "test": "vitest run src",
+    "test:e2e": "playwright test",
+    "format:check": "prettier --check src e2e *.ts *.json index.html",
+    "format": "prettier --write src e2e *.ts *.json index.html"
+  },
+  "dependencies": {
+    "@radix-ui/react-tabs": "^1.1.0",
+    "lucide-react": "^0.468.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "react-is": "^19.3.0",
+    "recharts": "^3.0.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.61.1",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@vitejs/plugin-react": "^4.3.0",
+    "prettier": "^3.9.9",
+    "typescript": "^5.7.0",
+    "vite": "^6.0.0",
+    "vitest": "4.1.11"
+  }
+}
